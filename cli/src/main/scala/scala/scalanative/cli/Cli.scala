@@ -1,9 +1,8 @@
 package scala.scalanative.cli
 
-import java.io.ByteArrayInputStream
 import java.io.File
+import java.net.URL
 import java.util.Properties
-import scala.io.Source
 import scopt._
 
 sealed abstract class Action
@@ -71,9 +70,8 @@ object Cli {
   def fetchProperties(get: Action.Get): BinaryProperties = {
     val url =
       s"https://raw.githubusercontent.com/${get.org}/${get.repo}/master/.scalanative"
-    val propsString = Source.fromURL(url).mkString
     val props = new Properties()
-    props.load(new ByteArrayInputStream(propsString.getBytes))
+    props.load(new URL(url).openStream())
     def getProperty(id: String): String = {
       val value = props.getProperty(id)
       if (value.eq(null)) {
