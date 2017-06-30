@@ -1,5 +1,7 @@
 package scala.scalanative.cli
 
+import sbt.io._
+import sbt.io.syntax._
 import java.io.File
 import java.net.URL
 import java.util.Properties
@@ -128,7 +130,19 @@ object Cli {
   def run(get: Action.Get): Unit = {
     val props = fetchProperties(get)
     val jars = fetchJars(props)
-    println(s"Fetched jars:\n  ${jars.mkString("\n  ")}")
+    link(props, jars)
+  }
+
+  def link(props: BinaryProperties, classpath: Seq[File]): Unit = {
+    println("Linking...")
+    IO.withTemporaryDirectory { workdir =>
+      val out = Link.link(classpath, workdir, props.main)
+      val home = file(System.getProperty("user.home"))
+      val res = home / ".scalanative" / "bin" / props.name
+      IO.copyFile(out, res)
+      res.setExecutable(true, false)
+    }
+    println("Done!")
   }
 
   def main(args: Array[String]): Unit = {

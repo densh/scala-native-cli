@@ -8,15 +8,21 @@ import scala.sys.process.Process
 import scalanative.nir
 import scalanative.tools
 
-sealed abstract class GarbageCollector(val name: String,
-                                       val links: Seq[String] = Nil)
-object GarbageCollector {
+private sealed abstract class GarbageCollector(val name: String, val links: Seq[String] = Nil)
+private object GarbageCollector {
   object None  extends GarbageCollector("none")
   object Boehm extends GarbageCollector("boehm", Seq("gc"))
   object Immix extends GarbageCollector("immix")
 }
 
 private class Link(classpath: Seq[File], workdir: File, main: String) {
+
+  def task[T](name: String)(f: => T): T = {
+    println(s"running $name")
+    val res = f
+    println(s"complete $name")
+    res
+  }
 
   implicit class RichFile(file: File) {
     def abs: String =
@@ -55,12 +61,12 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
   val clangVersions =
     Seq(("4", "0"), ("3", "9"), ("3", "8"), ("3", "7"))
 
-  lazy val clang: File = {
+  lazy val clang: File = task("clang") {
     val clang = discover("clang", clangVersions)
     clang
   }
 
-  lazy val clangpp: File = {
+  lazy val clangpp: File = task("clangpp") {
     val clang = discover("clang++", clangVersions)
     clang
   }
@@ -69,7 +75,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
 
   lazy val mode: tools.Mode = tools.Mode.Release
 
-  lazy val compileOptions: Seq[String] = {
+  lazy val compileOptions: Seq[String] = task("compileOptions") {
     val includes = {
       val includedir =
         Try(Process(Seq("llvm-config", "--includedir")).lines_!)
@@ -79,7 +85,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     includes :+ "-Qunused-arguments"
   }
 
-  lazy val linkingOptions: Seq[String] = {
+  lazy val linkingOptions: Seq[String] = task("linkingOptions") {
     val libs = {
       val libdir =
         Try(Process(Seq("llvm-config", "--libdir")).lines_!)
@@ -89,7 +95,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     libs
   }
 
-  lazy val target = {
+  lazy val target = task("target") {
     // Use non-standard extension to not include the ll file when linking (#639)
     val targetc  = workdir / "target" / "c.probe"
     val targetll = workdir / "target" / "ll.probe"
@@ -134,7 +140,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
   lazy val optimizerReporter: tools.OptimizerReporter =
     tools.OptimizerReporter.empty
 
-  lazy val linkNIR: tools.LinkerResult = {
+  lazy val linkNIR: tools.LinkerResult = task("linkNIR") {
     val result =
       tools.link(config, optimizerDriver, linkerReporter)
     if (result.unresolved.nonEmpty) {
@@ -144,28 +150,33 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     result
   }
 
-  lazy val optimizeNIR: Seq[nir.Defn] =
+  lazy val optimizeNIR: Seq[nir.Defn] = task("optimizeNIR") {
     tools.optimize(config, optimizerDriver, linkNIR.defns,
                    linkNIR.dyns, optimizerReporter)
+  }
 
-  lazy val generateLL: Seq[File] = {
+  lazy val generateLL: Seq[File] = task("generateLL") {
     tools.codegen(config, optimizeNIR)
     (workdir ** "*.ll").get.toSeq
   }
 
-  lazy val compileLL: Seq[File] =
-    generateLL.par
+  lazy val compileLL: Seq[File] = task("compileLL") {
+    generateLL
       .map { ll =>
-        val apppath = ll.abs
-        val outpath = apppath + ".o"
-        val compile = Seq(clangpp.abs, "-c", apppath, "-o", outpath) ++ compileOptions
-        Process(compile, workdir).!
-        file(outpath)
+        task(s"compileLL($ll)") {
+          val apppath = ll.abs
+          val outpath = apppath + ".o"
+          val compile = Seq(clangpp.abs, "-c", apppath, "-o", outpath) ++ compileOptions
+          println(s"running $compile")
+          Process(compile, workdir).!
+          file(outpath)
+        }
       }
       .seq
       .toSeq
+  }
 
-  lazy val unpackLib: File = {
+  lazy val unpackLib: File = task("unpackLib") {
     val lib = workdir / "lib"
     val jar =
       classpath
@@ -191,7 +202,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     lib
   }
 
-  lazy val compileLib: File = {
+  lazy val compileLib: File = task("compileLib") {
     val linked    = linkNIR
     val opts      = compileOptions ++ Seq("-O2")
     val nativelib = unpackLib
@@ -209,7 +220,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
         val name = file(path).getName.split("\\.").head
         linked.links.map(_.name).contains(name)
       } else if (path.contains(sep + "gc" + sep)) {
-        path.contains("gc" + sep + gc)
+        path.contains("gc" + sep + gc.name)
       } else {
         true
       }
@@ -222,11 +233,13 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
         if (ofile.exists) {
           IO.delete(ofile)
         }
+      } else {
+        println(s"excluding $path")
       }
     }
 
-    // generate .o files for all included source files in parallel
-    paths.par.foreach {
+    // generate .o files for all included source files
+    paths.foreach {
       path =>
         val opath = path + ".o"
         if (include(path) && !file(opath).exists) {
@@ -238,6 +251,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
                                                        "-o",
                                                        opath)
 
+          println(s"runnning $compilec")
           val result = Process(compilec, workdir).!
           if (result != 0) {
             sys.error("Failed to compile native library runtime code.")
@@ -248,7 +262,7 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     nativelib
   }
 
-  lazy val linkLL: File = {
+  lazy val linkLL: File = task("linkLL") {
     val linked      = linkNIR
     val apppaths    = compileLL
     val nativelib   = compileLib
@@ -276,12 +290,13 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
     val paths     = apppaths.map(_.abs) ++ opaths
     val compile   = clangpp.abs +: (flags ++ paths)
 
+    println(s"running $compile")
     Process(compile, workdir).!
 
     outfile
   }
 
-  lazy val link: File = {
+  lazy val link: File = task("link") {
     linkNIR
     optimizeNIR
     generateLL
@@ -294,6 +309,8 @@ private class Link(classpath: Seq[File], workdir: File, main: String) {
 }
 
 object Link {
-  def link(classpath: Seq[File], workdir: File, main: String): File =
+  def link(classpath: Seq[File], workdir: File, main: String): File = {
+    println(s"linking in $workdir")
     (new Link(classpath, workdir, main)).link
+  }
 }
