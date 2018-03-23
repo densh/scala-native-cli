@@ -136,7 +136,9 @@ object Cli {
   def link(props: BinaryProperties, classpath: Seq[File]): Unit = {
     println("Linking...")
     IO.withTemporaryDirectory { workdir =>
-      val out = Link.link(classpath, workdir, props.main)
+      println("WORKDIR" + workdir)
+      println("WORKDIR" + workdir.toPath)
+      val out = Link.link(classpath.map(_.toPath), workdir.toPath, props.main + "$").toFile
       val home = file(System.getProperty("user.home"))
       val res = home / ".scalanative" / "bin" / props.name
       IO.copyFile(out, res)
